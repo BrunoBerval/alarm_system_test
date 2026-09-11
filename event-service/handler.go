@@ -16,7 +16,33 @@ type EventPublisher interface {
 }
 
 type EventHandler struct {
-	Publisher EventPublisher
+	Publisher   EventPublisher
+	EventChannel chan []byte
+}
+
+func NewEventHandler(publisher EventPublisher, bufferSize int) *EventHandler {
+	return &EventHandler{
+		Publisher:    publisher,
+		EventChannel: make(chan []byte, bufferSize),
+	}
+}
+
+// StartWorkers inicia o pool de goroutines em background
+func (h *EventHandler) StartWorkers(numWorkers int) {
+	for i := 1; i <= numWorkers; i++ {
+		go func(workerID int) {
+			for msgBytes := range h.EventChannel {
+				var payload EventPayload
+				json.Unmarshal(msgBytes, &payload)
+
+				if err := h.Publisher.Publish("alarms/events", msgBytes); err != nil {
+					slog.Error("Worker falhou ao publicar evento", "worker", workerID, "erro", err.Error(), "device_id", payload.DeviceID)
+				} else {
+					slog.Info("Worker processou e publicou evento", "worker", workerID, "device_id", payload.DeviceID)
+				}
+			}
+		}(i)
+	}
 }
 
 func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
@@ -36,12 +62,13 @@ func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	msgBytes, _ := json.Marshal(payload)
 
-	if err := h.Publisher.Publish("alarms/events", msgBytes); err != nil {
-		slog.Error("Erro ao publicar evento no broker", "erro", err.Error(), "device_id", payload.DeviceID)
-		http.Error(w, "erro ao publicar evento", http.StatusInternalServerError)
-		return
+	// Tenta enfileirar a mensagem no canal não-bloqueante (se houver espaço no buffer)
+	select {
+	case h.EventChannel <- msgBytes:
+		slog.Info("Evento enfileirado com sucesso", "device_id", payload.DeviceID)
+		w.WriteHeader(http.StatusOK)
+	default:
+		slog.Warn("Buffer de eventos cheio, requisicao rejeitada por sobrecarga", "device_id", payload.DeviceID)
+		http.Error(w, "server overloaded", http.StatusServiceUnavailable)
 	}
-
-	slog.Info("Evento publicado com sucesso", "device_id", payload.DeviceID, "type", payload.Type)
-	w.WriteHeader(http.StatusOK)
 }

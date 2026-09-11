@@ -9,8 +9,6 @@ services:
       - ./infra/mosquitto.conf:/mosquitto/config/mosquitto.conf
     restart: always
     healthcheck:
-      # mosquitto_sub se inscreve em um tópico do sistema e aguarda 1 mensagem (-C 1).
-      # Se ele receber a mensagem, sabemos que o broker está pronto para receber tráfego.
       test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 || exit 1"]
       interval: 10s
       timeout: 5s
@@ -30,24 +28,27 @@ services:
       - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: always
     healthcheck:
-      # Utilitário oficial do PostgreSQL para checar se ele já está aceitando conexões
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-alarm_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # Event Service (API de entrada)
+  # Event Service (API de entrada com worker pool configurado via ambiente)
   event-service:
     image: golang:1.24-alpine
     container_name: event-service-app
     working_dir: /app
+    environment:
+      - EVENT_WORKERS=${EVENT_WORKERS:-3}
+      - EVENT_BUFFER_SIZE=${EVENT_BUFFER_SIZE:-50}
     ports:
       - "${EVENT_SERVICE_PORT:-8082}:8080"
     volumes:
       - ./event-service:/app
     depends_on:
       broker:
-        condition: service_healthy # Só sobe após o Mosquitto passar no healthcheck
+        condition: service_healthy
+    restart: always
     command: tail -f /dev/null
 
   # Alarm Service (Processamento e persistência)
@@ -61,7 +62,8 @@ services:
       - ./alarm-service:/app
     depends_on:
       broker:
-        condition: service_healthy # Só sobe após o Mosquitto passar no healthcheck
+        condition: service_healthy
       database:
-        condition: service_healthy # Só sobe após o PostgreSQL passar no healthcheck
+        condition: service_healthy
+    restart: always
     command: tail -f /dev/null
