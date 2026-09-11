@@ -12,6 +12,18 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// Implementação real que envia falhas críticas para um tópico DLQ no Mosquitto
+type MQTTDLQPublisher struct {
+	Client mqtt.Client
+}
+
+func (m *MQTTDLQPublisher) Publish(payload []byte) error {
+	// Publica a mensagem de falha no tópico DLQ
+	token := m.Client.Publish("alarms/events/dlq", 1, false, payload)
+	token.Wait()
+	return token.Error()
+}
+
 func main() {
 	// 1. Conexão com o PostgreSQL
 	dbConnStr := "postgres://admin:password123@database:5432/alarm_db?sslmode=disable"
@@ -35,7 +47,8 @@ func main() {
 
 	// Define o callback que será executado quando uma mensagem chegar
 	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
-		ProcessEvent(repo, msg.Payload())
+		dlq := &MQTTDLQPublisher{Client: client} // Instancia o publicador DLQ real
+		ProcessEvent(repo, dlq, msg.Payload())   // Repassa para a regra de negócio do consumidor
 	})
 
 	mqttClient := mqtt.NewClient(opts)
