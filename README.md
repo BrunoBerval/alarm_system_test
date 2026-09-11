@@ -91,7 +91,77 @@ curl -X POST http://localhost:8080/events \
   -H "Content-Type: application/json" \
   -d '{"device_id": "sensor-001", "type": "MOTION_DETECTED"}'
 ```
-
+---
+## 📐 Visão geral
+ 
+```text
+alarm_system_test/
+│
+├── README.md                        # Documentação principal e decisões técnicas
+├── docker-compose.yaml              # Orquestra os 5 containers do ecossistema
+├── .env.example                     # Modelo de variáveis (portas e credenciais)
+├── .gitignore
+│
+├── docs/                            # Material de apoio do README
+│   └── capa.jpg                     # Imagem de capa exibida no topo do README
+│
+├── infra/                           # Configs montadas como volume nos containers
+│   ├── init.sql                     # DDL da tabela alarms + índices (roda no 1º boot)
+│   └── mosquitto.conf               # Listener 1883 e acesso anônimo do broker
+│
+├── event-service/                   # 📥 PRODUTOR — API HTTP que publica no broker
+│   ├── main.go                      # Bootstrap: MQTT, mux, servidor e shutdown
+│   ├── config.go                    # Struct Config + leitura das env vars
+│   ├── handler.go                   # POST /events, worker pool e retry de publicação
+│   ├── middleware .go               # withCORS: intercepta preflight antes do mux
+│   ├── handler_test.go              # Testes do handler, buffer cheio, retry e drain
+│   ├── middleware_test.go           # Testes de CORS, preflight e origens restritas
+│   ├── go.mod                       # Módulo Go + dependências (paho.mqtt.golang)
+│   ├── go.sum
+│   ├── Dockerfile                   # Multi-stage: golang:1.24-alpine → alpine:3.20
+│   └── .dockerignore
+│
+├── alarm-service/                   # 🚨 CONSUMIDOR — assina o broker, persiste e expõe API
+│   ├── main.go                      # Bootstrap: Postgres, MQTT, Swagger e shutdown
+│   ├── api.go                       # AlarmAPI: rotas, GET /alarms, PATCH close, /health
+│   ├── config.go                    # Config + DSN() com escape via url.UserPassword
+│   ├── consumer.go                  # Processor: regra de negócio, retry e envio à DLQ
+│   ├── repository.go                # Struct Alarm + interface AlarmRepository
+│   ├── db.go                        # PostgresRepository: implementação SQL da interface
+│   ├── middleware.go                # withCORS (GET, PATCH, OPTIONS)
+│   ├── consumer_test.go             # Mocks de repo/DLQ + testes de duplicata e falha
+│   ├── middleware_test.go           # Testes de CORS e preflight
+│   ├── go.mod                       # Deps: paho, lib/pq, swaggo
+│   ├── go.sum
+│   ├── Dockerfile                   # Multi-stage, usuário não-root, expõe 8081
+│   ├── .dockerignore
+│   └── docs/                        # Gerado pelo swaggo e versionado no repo
+│       ├── docs.go                  # Spec embarcada no binário (import em branco)
+│       ├── swagger.json
+│       └── swagger.yaml
+│
+└── client/                          # 🖥️ PAINEL DE OPERAÇÃO — React + TS + Vite
+    ├── index.html                   # HTML raiz com <div id="root">
+    ├── package.json                 # Scripts dev/build/preview e dependências
+    ├── package-lock.json
+    ├── tsconfig.json                # TS estrito, JSX react-jsx, noEmit
+    ├── vite.config.ts               # Plugins react() e tailwindcss()
+    ├── Dockerfile                   # Build Vite → serve estático via nginx:alpine
+    ├── .dockerignore
+    ├── .env.example                 # VITE_*_API_URL resolvidas pelo navegador
+    ├── .gitignore
+    └── src/
+        ├── main.tsx                 # createRoot + StrictMode
+        ├── App.tsx                  # Layout em grid do painel
+        ├── index.css                # Tokens do tema (@theme) e animação do alarme
+        ├── vite-env.d.ts            # Tipagem de import.meta.env
+        ├── components/
+        │   ├── SingleEventForm.tsx  # Dispara 1 evento (sensor-XXX)
+        │   ├── BatchEventForm.tsx   # Dispara lote sequencial com limite de 200
+        │   └── AlarmList.tsx        # Lista, indicador luminoso e botão [Desligar]
+        └── services/
+            └── api.ts               # Cliente HTTP dos dois serviços + tipos Alarm/EventPayload
+```
 ---
 ## 🧠 Decisões Técnicas
 
