@@ -110,5 +110,27 @@ services:
       retries: 3
       start_period: 10s
 
+  # ---------------------------------------------------------------
+  # Client App (Painel de Operação Front-end)
+  # ---------------------------------------------------------------
+  client-app:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        # Estas URLs são resolvidas no navegador do usuário, portanto
+        # devem usar 'localhost' e as portas expostas no host.
+        - VITE_EVENT_API_URL=http://localhost:${EVENT_SERVICE_PORT:-8080}
+        - VITE_ALARM_API_URL=http://localhost:${ALARM_SERVICE_PORT:-8081}
+    container_name: alarm-client-app
+    ports:
+      - "${CLIENT_PORT:-3000}:80"
+    depends_on:
+      event-service:
+        condition: service_healthy
+      alarm-service:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres-data:
