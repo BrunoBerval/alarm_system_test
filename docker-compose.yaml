@@ -1,0 +1,45 @@
+services:
+  # Broker de Mensageria
+  broker:
+    image: eclipse-mosquitto:2
+    container_name: alarm-mqtt-broker
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./infra/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: always
+
+  # Banco de Dados
+  database:
+    image: postgres:15-alpine
+    container_name: alarm-postgres-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      POSTGRES_DB: ${POSTGRES_DB:-alarm_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    restart: always
+
+  # Event Service (API de entrada)
+  event-service:
+    image: golang:1.21-alpine
+    container_name: event-service-app
+    working_dir: /app
+    volumes:
+      - ./event-service:/app
+    depends_on:
+      - broker
+    command: tail -f /dev/null
+
+  # Alarm Service (Processamento e persistência)
+  alarm-service:
+    image: golang:1.21-alpine
+    container_name: alarm-service-app
+    working_dir: /app
+    volumes:
+      - ./alarm-service:/app
+    depends_on:
+      - broker
+      - database
+    command: tail -f /dev/null
