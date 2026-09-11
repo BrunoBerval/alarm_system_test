@@ -20,7 +20,8 @@ type MQTTPublisher struct {
 
 func (m *MQTTPublisher) Publish(topic string, payload []byte) error {
 	token := m.Client.Publish(topic, 1, false, payload)
-	// WaitTimeout para não travar indefinidamente caso o broker esteja fora do ar.
+	// WaitTimeout no lugar de Wait: sem prazo, um broker travado prendia
+	// o worker indefinidamente e o retry nunca chegava a acontecer.
 	if !token.WaitTimeout(5 * time.Second) {
 		return errors.New("timeout ao publicar no broker")
 	}
@@ -43,12 +44,14 @@ func main() {
 		"workers", cfg.EventWorkers, "buffer_size", cfg.EventBufferSize)
 
 	mux := http.NewServeMux()
+	// Padrão com método: um GET /events agora devolve 405 automaticamente,
+	// em vez de cair no handler e falhar tentando ler um corpo vazio.
 	mux.HandleFunc("POST /events", eventHandler.HandleEvent)
 	mux.HandleFunc("GET /health", healthHandler(client))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           mux,
+		Handler:           withCORS(cfg.CORSAllowedOrigins, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -90,7 +93,8 @@ func mustConnectMQTT(cfg Config) mqtt.Client {
 }
 
 // healthHandler reporta o estado real do serviço.
-
+// Um endpoint que devolve "UP" fixo deixaria o container marcado como
+// healthy mesmo com o broker fora do ar.
 func healthHandler(client mqtt.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -117,7 +121,8 @@ func waitForShutdown(srv *http.Server, h *EventHandler) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Para de aceitar requisições antes de drenar o buffer de eventos.
+	// Para de aceitar requisições primeiro, depois drena o buffer.
+	// Na ordem inversa, eventos aceitos durante o shutdown seriam perdidos.
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("Erro no shutdown do servidor HTTP", "erro", err.Error())
 	}

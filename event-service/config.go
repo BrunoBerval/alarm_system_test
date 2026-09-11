@@ -5,7 +5,8 @@ import (
 	"strconv"
 )
 
-// Config concentra tudo que vem do ambiente para evitar espalhar getenv por todo o código.
+// Config concentra tudo que vem do ambiente.
+// Manter isso num único lugar evita valores hardcoded espalhados pelo main.
 type Config struct {
 	HTTPPort        string
 	MQTTBrokerURL   string
@@ -13,6 +14,10 @@ type Config struct {
 	MQTTTopic       string
 	EventWorkers    int
 	EventBufferSize int
+
+	// Origens aceitas pelo navegador. "*" libera qualquer uma.
+	// Em produção viraria a lista de domínios do front.
+	CORSAllowedOrigins string
 }
 
 func LoadConfig() Config {
@@ -23,6 +28,8 @@ func LoadConfig() Config {
 		MQTTTopic:       getEnv("MQTT_TOPIC", "alarms/events"),
 		EventWorkers:    getEnvInt("EVENT_WORKERS", 3),
 		EventBufferSize: getEnvInt("EVENT_BUFFER_SIZE", 50),
+
+		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "*"),
 	}
 }
 

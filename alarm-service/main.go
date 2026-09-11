@@ -20,8 +20,11 @@ import (
 
 // MQTTDLQPublisher envia falhas críticas para o tópico de DLQ.
 //
-// MQTT não é fila, é pub/sub. Sem retenção, porém a última falha fica disponível para quem assinar o tópico depois.
-// É uma limitação  só a última mensagem por tópico é preservada.
+// retained = true de propósito: MQTT não é fila, é pub/sub. Sem retenção,
+// uma mensagem publicada sem nenhum assinante online é descartada pelo broker
+// na hora, e a "DLQ" não guardaria absolutamente nada. Com retenção, ao menos
+// a última falha fica disponível para quem assinar o tópico depois.
+// A limitação continua: só a última mensagem por tópico é preservada.
 type MQTTDLQPublisher struct {
 	Client mqtt.Client
 	Topic  string
@@ -62,7 +65,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           mux,
+		Handler:           withCORS(cfg.CORSAllowedOrigins, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -125,6 +128,10 @@ func mustConnectMQTT(cfg Config, repo AlarmRepository) mqtt.Client {
 	})
 
 	// A assinatura vai dentro do OnConnect.
+	//
+	// Antes o Subscribe era chamado uma única vez, depois do Connect. Numa
+	// reconexão automática o cliente voltava conectado mas sem assinatura:
+	// o serviço ficava vivo, com log limpo, e simplesmente parava de consumir.
 	// Registrando aqui, toda reconexão restabelece a assinatura.
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		slog.Info("Conectado ao Broker MQTT", "broker", cfg.MQTTBrokerURL)

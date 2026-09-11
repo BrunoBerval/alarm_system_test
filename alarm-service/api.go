@@ -12,7 +12,9 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-
+// AlarmAPI carrega as dependências dos handlers.
+// Substitui a variável global `var repo AlarmRepository`, que impedia
+// testar os handlers isoladamente e criava acoplamento implícito.
 type AlarmAPI struct {
 	Repo AlarmRepository
 	DB   *sql.DB
@@ -22,7 +24,9 @@ type AlarmAPI struct {
 var uuidRegex = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-
+// Routes registra as rotas usando os padrões com método do ServeMux (Go 1.22+).
+// Isso elimina o parsing manual de URL com strings.Split e faz o mux devolver
+// 405 sozinho quando o método não bate.
 func (a *AlarmAPI) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /alarms", a.GetAlarms)
 	mux.HandleFunc("PATCH /alarms/{id}/close", a.CloseAlarm)
@@ -61,6 +65,8 @@ func (a *AlarmAPI) GetAlarms(w http.ResponseWriter, r *http.Request) {
 func (a *AlarmAPI) CloseAlarm(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
+	// Sem esta validação, um id fora do formato UUID chegava no Postgres
+	// e voltava como erro de driver, virando 500 no lugar de 400.
 	if !uuidRegex.MatchString(id) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id deve ser um UUID valido"})
 		return
@@ -73,7 +79,7 @@ func (a *AlarmAPI) CloseAlarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
+	// Antes: qualquer id devolvia 200, inclusive os inexistentes.
 	if !closed {
 		slog.Warn("Tentativa de fechar alarme inexistente ou ja fechado", "alarm_id", id)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "alarme nao encontrado ou ja fechado"})
@@ -84,7 +90,7 @@ func (a *AlarmAPI) CloseAlarm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "closed", "id": id})
 }
 
-// Health checa as dependências externas 
+// Health checa as dependências externas de verdade.
 func (a *AlarmAPI) Health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -117,7 +123,9 @@ func state(up bool) string {
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// O header de CORS é responsabilidade exclusiva do withCORS.
+	// Setar aqui também faria a resposta sair com o valor duplicado,
+	// e o navegador bloqueia quando encontra mais de um.
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		slog.Error("Erro ao serializar resposta", "erro", err.Error())

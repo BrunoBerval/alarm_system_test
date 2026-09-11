@@ -24,6 +24,9 @@ type Config struct {
 
 	MaxRetries     int
 	BaseRetryDelay time.Duration
+
+	// Origens aceitas pelo navegador. "*" libera qualquer uma.
+	CORSAllowedOrigins string
 }
 
 func LoadConfig() Config {
@@ -43,10 +46,14 @@ func LoadConfig() Config {
 
 		MaxRetries:     getEnvInt("DB_MAX_RETRIES", 3),
 		BaseRetryDelay: time.Duration(getEnvInt("DB_RETRY_DELAY_MS", 100)) * time.Millisecond,
+
+		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "*"),
 	}
 }
 
-
+// DSN monta a connection string com escape correto.
+// url.UserPassword cuida de senhas com caracteres especiais (@, :, /),
+// que quebrariam uma string concatenada na mão.
 func (c Config) DSN() string {
 	u := url.URL{
 		Scheme:   "postgres",
