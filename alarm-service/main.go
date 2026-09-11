@@ -3,8 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -25,18 +26,24 @@ func (m *MQTTDLQPublisher) Publish(payload []byte) error {
 }
 
 func main() {
+	// Configura o Log Estruturado (JSON) como padrão
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// 1. Conexão com o PostgreSQL
 	dbConnStr := "postgres://admin:password123@database:5432/alarm_db?sslmode=disable"
 	db, err := sql.Open("postgres", dbConnStr)
 	if err != nil {
-		log.Fatalf("Erro ao conectar no banco: %v", err)
+		slog.Error("Erro ao inicializar conexão com o banco", "erro", err.Error())
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		log.Fatalf("Banco de dados não está respondendo: %v", err)
+		slog.Error("Banco de dados não está respondendo", "erro", err.Error())
+		os.Exit(1)
 	}
-	log.Println("✅ Conectado ao PostgreSQL")
+	slog.Info("Conectado ao PostgreSQL")
 
 	repo := &PostgresRepository{DB: db}
 
@@ -53,15 +60,17 @@ func main() {
 
 	mqttClient := mqtt.NewClient(opts)
 	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("Erro ao conectar no MQTT: %v", token.Error())
+		slog.Error("Erro ao conectar no MQTT", "erro", token.Error())
+		os.Exit(1)
 	}
-	log.Println("✅ Conectado ao Broker MQTT")
+	slog.Info("Conectado ao Broker MQTT")
 
 	// Assina o tópico
 	if token := mqttClient.Subscribe("alarms/events", 1, nil); token.Wait() && token.Error() != nil {
-		log.Fatalf("Erro ao assinar tópico: %v", token.Error())
+		slog.Error("Erro ao assinar tópico", "erro", token.Error())
+		os.Exit(1)
 	}
-	log.Println("📡 Aguardando eventos no tópico alarms/events...")
+	slog.Info("Aguardando eventos", "topico", "alarms/events")
 
 	// 3. Servidor HTTP (Para listagem e encerramento dos alarmes)
 	http.HandleFunc("/alarms", func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +80,7 @@ func main() {
 		if r.Method == http.MethodGet {
 			alarms, err := repo.GetAlarms()
 			if err != nil {
+				slog.Error("Erro ao buscar alarmes no banco", "erro", err.Error())
 				http.Error(w, `{"error": "erro ao buscar alarmes"}`, http.StatusInternalServerError)
 				return
 			}
@@ -93,9 +103,11 @@ func main() {
 			if len(parts) >= 3 {
 				id := parts[2]
 				if err := repo.CloseAlarm(id); err != nil {
+					slog.Error("Erro ao fechar alarme no banco", "erro", err.Error(), "alarm_id", id)
 					http.Error(w, `{"error": "erro ao fechar alarme"}`, http.StatusInternalServerError)
 					return
 				}
+				slog.Info("Alarme fechado via API", "alarm_id", id)
 				w.WriteHeader(http.StatusOK)
 				return
 			}
@@ -103,8 +115,9 @@ func main() {
 		http.Error(w, "Rota não encontrada", http.StatusNotFound)
 	})
 
-	log.Println("🚀 Alarm Service rodando na porta 8081...")
+	slog.Info("Alarm Service rodando", "porta", 8081)
 	if err := http.ListenAndServe(":8081", nil); err != nil {
-		log.Fatalf("Erro ao iniciar servidor HTTP: %v", err)
+		slog.Error("Erro ao iniciar servidor HTTP", "erro", err.Error())
+		os.Exit(1)
 	}
 }

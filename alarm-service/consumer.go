@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -22,19 +22,19 @@ func ProcessEvent(repo AlarmRepository, dlq DLQPublisher, payload []byte) {
 	var event EventPayload
 
 	if err := json.Unmarshal(payload, &event); err != nil {
-		log.Printf("Erro ao decodificar JSON do broker: %v\n", err)
+		slog.Error("Erro ao decodificar JSON do broker", "erro", err.Error())
 		return
 	}
 
 	if event.Type == "MOTION_DETECTED" {
 		hasOpen, err := repo.HasOpenAlarm(event.DeviceID)
 		if err != nil {
-			log.Printf("Erro ao checar alarmes abertos: %v\n", err)
+			slog.Error("Erro ao checar alarmes abertos", "erro", err.Error(), "device_id", event.DeviceID)
 			return
 		}
 
 		if hasOpen {
-			log.Printf("⚠️ Alarme ignorado: O dispositivo %s já possui um alarme OPEN.\n", event.DeviceID)
+			slog.Warn("Alarme ignorado", "motivo", "dispositivo já possui alarme OPEN", "device_id", event.DeviceID)
 			return
 		}
 
@@ -43,11 +43,11 @@ func ProcessEvent(repo AlarmRepository, dlq DLQPublisher, payload []byte) {
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			err := repo.CreateAlarm(event.DeviceID, event.Type)
 			if err == nil {
-				log.Printf("🚨 Alarme criado com sucesso para o dispositivo: %s\n", event.DeviceID)
+				slog.Info("Alarme criado com sucesso", "device_id", event.DeviceID)
 				return // Sucesso, sai da função
 			}
 
-			log.Printf("❌ Falha ao salvar no banco (Tentativa %d/%d): %v\n", attempt, maxRetries, err)
+			slog.Error("Falha ao salvar no banco", "tentativa", attempt, "erro", err.Error(), "device_id", event.DeviceID)
 			
 			if attempt < maxRetries {
 				time.Sleep(baseRetryDelay * time.Duration(attempt)) // Exponential backoff simples
@@ -55,9 +55,9 @@ func ProcessEvent(repo AlarmRepository, dlq DLQPublisher, payload []byte) {
 		}
 
 		// Se chegou aqui, esgotou as tentativas. Envia para DLQ.
-		log.Printf("💀 Esgotadas as tentativas para o dispositivo %s. Enviando para DLQ...\n", event.DeviceID)
+		slog.Error("Esgotadas as tentativas", "acao", "enviando para DLQ", "device_id", event.DeviceID)
 		if err := dlq.Publish(payload); err != nil {
-			log.Printf("Erro fatal ao enviar para DLQ: %v\n", err)
+			slog.Error("Erro fatal ao enviar para DLQ", "erro", err.Error(), "device_id", event.DeviceID)
 		}
 	}
 }
