@@ -5,27 +5,43 @@ import (
 	"net/http"
 )
 
-// EventPayload representa a estrutura que o cliente vai enviar no JSON
 type EventPayload struct {
 	DeviceID string `json:"device_id"`
 	Type     string `json:"type"`
 }
 
-func HandleEvent(w http.ResponseWriter, r *http.Request) {
+// EventPublisher é a interface que permite injetar a dependência (Broker Real ou Mock)
+type EventPublisher interface {
+	Publish(topic string, payload []byte) error
+}
+
+// EventHandler carrega as dependências necessárias para a rota
+type EventHandler struct {
+	Publisher EventPublisher
+}
+
+// HandleEvent agora pertence à struct EventHandler
+func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	var payload EventPayload
 
-	// Decodifica o corpo da requisição (JSON) para a nossa struct
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
-	// Valida se os campos obrigatórios vieram preenchidos
 	if payload.DeviceID == "" || payload.Type == "" {
 		http.Error(w, "device_id e type sao obrigatorios", http.StatusBadRequest)
 		return
 	}
 
-	// Se passou pelas validações, retorna 200 OK (por enquanto)
+	// Converte a struct de volta para JSON para envio ao Broker
+	msgBytes, _ := json.Marshal(payload)
+
+	// Publica no tópico "alarms/events"[cite: 1]
+	if err := h.Publisher.Publish("alarms/events", msgBytes); err != nil {
+		http.Error(w, "erro ao publicar evento", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }

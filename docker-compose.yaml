@@ -23,7 +23,7 @@ services:
 
   # Event Service (API de entrada)
   event-service:
-    image: golang:1.21-alpine
+    image: golang:1.24-alpine
     container_name: event-service-app
     working_dir: /app
     volumes:
@@ -34,7 +34,7 @@ services:
 
   # Alarm Service (Processamento e persistência)
   alarm-service:
-    image: golang:1.21-alpine
+    image: golang:1.24-alpine
     container_name: alarm-service-app
     working_dir: /app
     volumes:
