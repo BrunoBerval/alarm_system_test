@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------- Estágio 1: build ----------
-FROM golang:1.25-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /src
 
@@ -12,9 +12,7 @@ RUN go mod download
 
 COPY . .
 
-# CGO_ENABLED=0 gera um binário estático, que roda em qualquer base sem libc.
-# -trimpath remove os caminhos absolutos da máquina de build.
-# -s -w removem tabela de símbolos e DWARF (binário menor).
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w" \
