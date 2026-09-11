@@ -1,20 +1,26 @@
 services:
-  # Broker de Mensageria
+  # ---------------------------------------------------------------
+  # Broker de Mensageria (MQTT)
+  # ---------------------------------------------------------------
   broker:
     image: eclipse-mosquitto:2
     container_name: alarm-mqtt-broker
     ports:
       - "${MQTT_PORT:-1883}:1883"
     volumes:
-      - ./infra/mosquitto.conf:/mosquitto/config/mosquitto.conf
-    restart: always
+      - ./infra/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 || exit 1"]
+      # -C 1 encerra após a primeira mensagem, -W 3 evita travar se o broker não responder
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 5s
 
-  # Banco de Dados
+  # ---------------------------------------------------------------
+  # Banco de Dados (PostgreSQL)
+  # ---------------------------------------------------------------
   database:
     image: postgres:15-alpine
     container_name: alarm-postgres-db
@@ -25,45 +31,82 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql
-    restart: always
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-alarm_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
-  # Event Service (API de entrada com worker pool configurado via ambiente)
+  # ---------------------------------------------------------------
+  # Event Service (API HTTP de entrada, publica no broker)
+  # ---------------------------------------------------------------
   event-service:
-    image: golang:1.24-alpine
+    build:
+      context: ./event-service
+      dockerfile: Dockerfile
     container_name: event-service-app
-    working_dir: /app
     environment:
-      - EVENT_WORKERS=${EVENT_WORKERS:-3}
-      - EVENT_BUFFER_SIZE=${EVENT_BUFFER_SIZE:-50}
+      HTTP_PORT: 8080
+      MQTT_BROKER_URL: tcp://broker:1883
+      MQTT_CLIENT_ID: event-service
+      MQTT_TOPIC: alarms/events
+      EVENT_WORKERS: ${EVENT_WORKERS:-3}
+      EVENT_BUFFER_SIZE: ${EVENT_BUFFER_SIZE:-50}
     ports:
-      - "${EVENT_SERVICE_PORT:-8082}:8080"
-    volumes:
-      - ./event-service:/app
+      - "${EVENT_SERVICE_PORT:-8080}:8080"
     depends_on:
       broker:
         condition: service_healthy
-    restart: always
-    command: tail -f /dev/null
+    restart: unless-stopped
+    healthcheck:
+      # /health devolve 503 se a conexão com o broker cair,
+      # e o wget do busybox propaga isso como exit code != 0
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  # Alarm Service (Processamento e persistência)
+  # ---------------------------------------------------------------
+  # Alarm Service (consome do broker, persiste e expõe a API)
+  # ---------------------------------------------------------------
   alarm-service:
-    image: golang:1.24-alpine
+    build:
+      context: ./alarm-service
+      dockerfile: Dockerfile
     container_name: alarm-service-app
-    working_dir: /app
+    environment:
+      HTTP_PORT: 8081
+      MQTT_BROKER_URL: tcp://broker:1883
+      MQTT_CLIENT_ID: alarm-service
+      MQTT_TOPIC: alarms/events
+      MQTT_DLQ_TOPIC: alarms/events/dlq
+      # Prefixo DB_ para não colidir com POSTGRES_PORT, que no .env
+      # representa a porta publicada no host, não a porta interna.
+      DB_HOST: database
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      DB_NAME: ${POSTGRES_DB:-alarm_db}
+      DB_SSLMODE: disable
     ports:
       - "${ALARM_SERVICE_PORT:-8081}:8081"
-    volumes:
-      - ./alarm-service:/app
     depends_on:
       broker:
         condition: service_healthy
       database:
         condition: service_healthy
-    restart: always
-    command: tail -f /dev/null
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres-data:

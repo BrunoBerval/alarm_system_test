@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log/slog"
@@ -30,6 +31,44 @@ func (m *MQTTDLQPublisher) Publish(payload []byte) error {
 
 // Variável global temporária para os handlers acessarem o repositório
 var repo AlarmRepository
+
+// healthHandler checa as duas dependências externas do serviço.
+// Se o banco ou o broker estiverem fora, responde 503 e o Docker
+// marca o container como unhealthy.
+func healthHandler(db *sql.DB, client mqtt.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		dbUp := db.PingContext(ctx) == nil
+		mqttUp := client.IsConnected()
+
+		body := map[string]string{
+			"status":   "UP",
+			"database": state(dbUp),
+			"mqtt":     state(mqttUp),
+		}
+
+		if !dbUp || !mqttUp {
+			body["status"] = "DOWN"
+			slog.Warn("Health check falhou", "database", state(dbUp), "mqtt", state(mqttUp))
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+
+		json.NewEncoder(w).Encode(body)
+	}
+}
+
+func state(up bool) string {
+	if up {
+		return "up"
+	}
+	return "down"
+}
 
 // @title Alarm System API
 // @version 1.0
@@ -86,14 +125,11 @@ func main() {
 	http.HandleFunc("/alarms/", closeAlarmHandler)
 
 	// Rota de Health Check
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "UP"}`))
-	})
-	
+	http.HandleFunc("/health", healthHandler(db, mqttClient))
+
 	// Rota do Swagger UI (com apontamento explícito para corrigir o 404)
 	http.HandleFunc("/swagger/", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"), 
+		httpSwagger.URL("/swagger/doc.json"),
 	))
 
 	slog.Info("Alarm Service rodando", "porta", 8081)

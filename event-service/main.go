@@ -20,6 +20,25 @@ func (m *MQTTPublisher) Publish(topic string, payload []byte) error {
 	return token.Error()
 }
 
+// healthHandler reporta o estado real do serviço.
+// Um healthcheck que devolve "UP" fixo não serve para nada: o container
+// continuaria marcado como healthy mesmo com o broker fora do ar.
+func healthHandler(client mqtt.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if !client.IsConnected() {
+			slog.Warn("Health check falhou", "motivo", "MQTT desconectado")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"DOWN","mqtt":"disconnected"}`))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"UP","mqtt":"connected"}`))
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
@@ -49,7 +68,7 @@ func main() {
 	slog.Info("Conectado ao Broker MQTT")
 
 	publisher := &MQTTPublisher{Client: client}
-	
+
 	// Inicializa o Handler com o Worker Pool e Buffer configurados
 	eventHandler := NewEventHandler(publisher, bufferSize)
 	eventHandler.StartWorkers(workers)
@@ -57,6 +76,7 @@ func main() {
 	slog.Info("Worker Pool inicializado", "workers", workers, "buffer_size", bufferSize)
 
 	http.HandleFunc("/events", eventHandler.HandleEvent)
+	http.HandleFunc("/health", healthHandler(client))
 
 	slog.Info("Event Service rodando", "porta", 8080)
 	if err := http.ListenAndServe(":8080", nil); err != nil {
