@@ -76,7 +76,7 @@ export function BatchEventForm() {
 
       <div className="flex items-center gap-4">
         <div className="flex flex-col gap-1 w-full">
-          <label htmlFor="fromSensor" className="text-sm font-medium">De</label>
+          <label htmlFor="fromSensor" className="text-sm font-medium">Do sensor:</label>
           <input
             id="fromSensor"
             type="number"
@@ -90,7 +90,7 @@ export function BatchEventForm() {
         </div>
 
         <div className="flex flex-col gap-1 w-full">
-          <label htmlFor="toSensor" className="text-sm font-medium">Até</label>
+          <label htmlFor="toSensor" className="text-sm font-medium">Até o:</label>
           <input
             id="toSensor"
             type="number"
