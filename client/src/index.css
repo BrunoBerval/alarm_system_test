@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/*
+  Apenas os subsets latinos. O import genérico ("400.css") traz também
+  cirílico, grego e vietnamita, o que gerava 36 arquivos de fonte no build
+  para um app em português.
+*/
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-400.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-500.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-600.css";
+
+/*
+  Tokens do projeto.
+
+  A referência visual é um painel físico de central de alarme: chapa clara
+  fria, tinta preta, e a cor reservada para os indicadores. Por isso a base
+  é neutra e existem apenas dois sinais, vermelho e verde. O alarme aberto
+  é a única coisa alta na tela.
+*/
+@theme {
+  --color-panel: #e8e9e4;
+  --color-surface: #f5f6f2;
+  --color-ink: #1b1d1a;
+  --color-muted: #6b6f68;
+  --color-line: #c9ccc4;
+
+  --color-alarm: #c8342b;
+  --color-alarm-soft: #f3dad7;
+  --color-ok: #3f7a54;
+  --color-ok-soft: #dceadf;
+
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+
+  --animate-alarm: alarm 1.1s ease-in-out infinite;
+}
+
+@keyframes alarm {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@layer base {
+  body {
+    background-color: var(--color-panel);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /*
+    IDs de sensor e horários são comparados em coluna. Números tabulares
+    alinham os dígitos sem precisar trocar para uma fonte monoespaçada.
+  */
+  table,
+  time,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}
+
+/* O ícone piscando é útil, mas não a ponto de ignorar quem pediu menos movimento. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
