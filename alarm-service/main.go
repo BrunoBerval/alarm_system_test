@@ -11,6 +11,10 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	_ "github.com/lib/pq"
+	httpSwagger "github.com/swaggo/http-swagger"
+
+	// O pacote docs gerado pelo Swaggo
+	_ "alarm-service/docs"
 )
 
 // Implementação real que envia falhas críticas para um tópico DLQ no Mosquitto
@@ -19,12 +23,19 @@ type MQTTDLQPublisher struct {
 }
 
 func (m *MQTTDLQPublisher) Publish(payload []byte) error {
-	// Publica a mensagem de falha no tópico DLQ
 	token := m.Client.Publish("alarms/events/dlq", 1, false, payload)
 	token.Wait()
 	return token.Error()
 }
 
+// Variável global temporária para os handlers acessarem o repositório
+var repo AlarmRepository
+
+// @title Alarm System API
+// @version 1.0
+// @description API para gerenciamento do ciclo de vida dos alarmes IoT.
+// @host localhost:8081
+// @BasePath /
 func main() {
 	// Configura o Log Estruturado (JSON) como padrão
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -45,17 +56,16 @@ func main() {
 	}
 	slog.Info("Conectado ao PostgreSQL")
 
-	repo := &PostgresRepository{DB: db}
+	repo = &PostgresRepository{DB: db}
 
 	// 2. Conexão com o MQTT
 	opts := mqtt.NewClientOptions().AddBroker("tcp://broker:1883").SetClientID("alarm-service")
 	opts.SetKeepAlive(2 * time.Second)
 	opts.SetPingTimeout(1 * time.Second)
 
-	// Define o callback que será executado quando uma mensagem chegar
 	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
-		dlq := &MQTTDLQPublisher{Client: client} // Instancia o publicador DLQ real
-		ProcessEvent(repo, dlq, msg.Payload())   // Repassa para a regra de negócio do consumidor
+		dlq := &MQTTDLQPublisher{Client: client}
+		ProcessEvent(repo, dlq, msg.Payload())
 	})
 
 	mqttClient := mqtt.NewClient(opts)
@@ -65,59 +75,88 @@ func main() {
 	}
 	slog.Info("Conectado ao Broker MQTT")
 
-	// Assina o tópico
 	if token := mqttClient.Subscribe("alarms/events", 1, nil); token.Wait() && token.Error() != nil {
 		slog.Error("Erro ao assinar tópico", "erro", token.Error())
 		os.Exit(1)
 	}
 	slog.Info("Aguardando eventos", "topico", "alarms/events")
 
-	// 3. Servidor HTTP (Para listagem e encerramento dos alarmes)
-	http.HandleFunc("/alarms", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Libera CORS para o frontend React
-		
-		if r.Method == http.MethodGet {
-			alarms, err := repo.GetAlarms()
-			if err != nil {
-				slog.Error("Erro ao buscar alarmes no banco", "erro", err.Error())
-				http.Error(w, `{"error": "erro ao buscar alarmes"}`, http.StatusInternalServerError)
-				return
-			}
-			if alarms == nil {
-				alarms = []Alarm{} // Garante que retorne [] ao invés de null
-			}
-			json.NewEncoder(w).Encode(alarms)
-			return
-		}
-		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
-	})
+	// 3. Rotas da API
+	http.HandleFunc("/alarms", getAlarmsHandler)
+	http.HandleFunc("/alarms/", closeAlarmHandler)
 
-	http.HandleFunc("/alarms/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "PATCH")
-
-		// Trata rota /alarms/{id}/close
-		if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/close") {
-			parts := strings.Split(r.URL.Path, "/")
-			if len(parts) >= 3 {
-				id := parts[2]
-				if err := repo.CloseAlarm(id); err != nil {
-					slog.Error("Erro ao fechar alarme no banco", "erro", err.Error(), "alarm_id", id)
-					http.Error(w, `{"error": "erro ao fechar alarme"}`, http.StatusInternalServerError)
-					return
-				}
-				slog.Info("Alarme fechado via API", "alarm_id", id)
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-		}
-		http.Error(w, "Rota não encontrada", http.StatusNotFound)
+	// Rota de Health Check
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "UP"}`))
 	})
+	
+	// Rota do Swagger UI (com apontamento explícito para corrigir o 404)
+	http.HandleFunc("/swagger/", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"), 
+	))
 
 	slog.Info("Alarm Service rodando", "porta", 8081)
 	if err := http.ListenAndServe(":8081", nil); err != nil {
 		slog.Error("Erro ao iniciar servidor HTTP", "erro", err.Error())
 		os.Exit(1)
 	}
+}
+
+// getAlarmsHandler godoc
+// @Summary Lista todos os alarmes
+// @Description Retorna a lista completa de alarmes (abertos e fechados)
+// @Tags alarms
+// @Produce json
+// @Success 200 {array} Alarm
+// @Failure 500 {string} string "Erro ao buscar alarmes"
+// @Router /alarms [get]
+func getAlarmsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method == http.MethodGet {
+		alarms, err := repo.GetAlarms()
+		if err != nil {
+			slog.Error("Erro ao buscar alarmes no banco", "erro", err.Error())
+			http.Error(w, `{"error": "erro ao buscar alarmes"}`, http.StatusInternalServerError)
+			return
+		}
+		if alarms == nil {
+			alarms = []Alarm{}
+		}
+		json.NewEncoder(w).Encode(alarms)
+		return
+	}
+	http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+}
+
+// closeAlarmHandler godoc
+// @Summary Desliga um alarme
+// @Description Altera o status do alarme para CLOSED e preenche a data de encerramento
+// @Tags alarms
+// @Param id path string true "UUID do Alarme"
+// @Success 200 {string} string "OK"
+// @Failure 404 {string} string "Rota não encontrada"
+// @Failure 500 {string} string "Erro interno"
+// @Router /alarms/{id}/close [patch]
+func closeAlarmHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "PATCH")
+
+	if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/close") {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 3 {
+			id := parts[2]
+			if err := repo.CloseAlarm(id); err != nil {
+				slog.Error("Erro ao fechar alarme no banco", "erro", err.Error(), "alarm_id", id)
+				http.Error(w, `{"error": "erro ao fechar alarme"}`, http.StatusInternalServerError)
+				return
+			}
+			slog.Info("Alarme fechado via API", "alarm_id", id)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+	http.Error(w, "Rota não encontrada", http.StatusNotFound)
 }

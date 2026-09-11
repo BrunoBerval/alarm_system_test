@@ -1,0 +1,105 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "API para gerenciamento do ciclo de vida dos alarmes IoT.",
+        "title": "Alarm System API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "host": "localhost:8081",
+    "basePath": "/",
+    "paths": {
+        "/alarms": {
+            "get": {
+                "description": "Retorna a lista completa de alarmes (abertos e fechados)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "alarms"
+                ],
+                "summary": "Lista todos os alarmes",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/main.Alarm"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Erro ao buscar alarmes",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/alarms/{id}/close": {
+            "patch": {
+                "description": "Altera o status do alarme para CLOSED e preenche a data de encerramento",
+                "tags": [
+                    "alarms"
+                ],
+                "summary": "Desliga um alarme",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "UUID do Alarme",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Rota não encontrada",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Erro interno",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.Alarm": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "device_id": {
+                    "type": "string"
+                },
+                "finished_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        }
+    }
+}

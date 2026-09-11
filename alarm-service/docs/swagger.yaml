@@ -1,0 +1,69 @@
+basePath: /
+definitions:
+  main.Alarm:
+    properties:
+      created_at:
+        type: string
+      device_id:
+        type: string
+      finished_at:
+        type: string
+      id:
+        type: string
+      status:
+        type: string
+      type:
+        type: string
+    type: object
+host: localhost:8081
+info:
+  contact: {}
+  description: API para gerenciamento do ciclo de vida dos alarmes IoT.
+  title: Alarm System API
+  version: "1.0"
+paths:
+  /alarms:
+    get:
+      description: Retorna a lista completa de alarmes (abertos e fechados)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.Alarm'
+            type: array
+        "500":
+          description: Erro ao buscar alarmes
+          schema:
+            type: string
+      summary: Lista todos os alarmes
+      tags:
+      - alarms
+  /alarms/{id}/close:
+    patch:
+      description: Altera o status do alarme para CLOSED e preenche a data de encerramento
+      parameters:
+      - description: UUID do Alarme
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+        "404":
+          description: Rota não encontrada
+          schema:
+            type: string
+        "500":
+          description: Erro interno
+          schema:
+            type: string
+      summary: Desliga um alarme
+      tags:
+      - alarms
+swagger: "2.0"
