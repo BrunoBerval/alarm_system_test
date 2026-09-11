@@ -28,6 +28,8 @@ services:
     image: golang:1.24-alpine
     container_name: event-service-app
     working_dir: /app
+    ports:
+      - "${EVENT_SERVICE_PORT:-8080}:8080"
     volumes:
       - ./event-service:/app
     depends_on:
@@ -39,6 +41,8 @@ services:
     image: golang:1.24-alpine
     container_name: alarm-service-app
     working_dir: /app
+    ports:
+      - "${ALARM_SERVICE_PORT:-8081}:8081"
     volumes:
       - ./alarm-service:/app
     depends_on:
