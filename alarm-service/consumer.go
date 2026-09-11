@@ -16,48 +16,83 @@ type DLQPublisher interface {
 	Publish(payload []byte) error
 }
 
-var baseRetryDelay = time.Second // Variável para podermos alterar no teste
+// Processor guarda as dependências do consumo, evitando estado global.
+type Processor struct {
+	Repo           AlarmRepository
+	DLQ            DLQPublisher
+	MaxRetries     int
+	BaseRetryDelay time.Duration
+}
 
-func ProcessEvent(repo AlarmRepository, dlq DLQPublisher, payload []byte) {
+func NewProcessor(repo AlarmRepository, dlq DLQPublisher, maxRetries int, baseDelay time.Duration) *Processor {
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	if baseDelay <= 0 {
+		baseDelay = 100 * time.Millisecond
+	}
+	return &Processor{
+		Repo:           repo,
+		DLQ:            dlq,
+		MaxRetries:     maxRetries,
+		BaseRetryDelay: baseDelay,
+	}
+}
+
+func (p *Processor) ProcessEvent(payload []byte) {
 	var event EventPayload
 
+	// Mensagem ilegível nunca vai processar, por mais que se tente.
+	// Reprocessar seria loop infinito, então vai direto para a DLQ.
 	if err := json.Unmarshal(payload, &event); err != nil {
-		slog.Error("Erro ao decodificar JSON do broker", "erro", err.Error())
+		slog.Error("Payload ilegivel vindo do broker", "erro", err.Error(), "payload", string(payload))
+		p.toDLQ(payload, "invalid_json")
 		return
 	}
 
-	if event.Type == "MOTION_DETECTED" {
-		hasOpen, err := repo.HasOpenAlarm(event.DeviceID)
-		if err != nil {
-			slog.Error("Erro ao checar alarmes abertos", "erro", err.Error(), "device_id", event.DeviceID)
-			return
-		}
+	if event.DeviceID == "" || event.Type == "" {
+		slog.Error("Evento sem campos obrigatorios", "payload", string(payload))
+		p.toDLQ(payload, "missing_fields")
+		return
+	}
 
-		if hasOpen {
-			slog.Warn("Alarme ignorado", "motivo", "dispositivo já possui alarme OPEN", "device_id", event.DeviceID)
-			return
-		}
+	if event.Type != "MOTION_DETECTED" {
+		slog.Info("Evento ignorado", "motivo", "tipo nao gera alarme", "type", event.Type, "device_id", event.DeviceID)
+		return
+	}
 
-		// Estratégia de Retry Local
-		maxRetries := 3
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			err := repo.CreateAlarm(event.DeviceID, event.Type)
-			if err == nil {
+	for attempt := 1; attempt <= p.MaxRetries; attempt++ {
+		created, err := p.Repo.CreateAlarm(event.DeviceID, event.Type)
+
+		if err == nil {
+			if created {
 				slog.Info("Alarme criado com sucesso", "device_id", event.DeviceID)
-				return // Sucesso, sai da função
+			} else {
+				// O índice único barrou: já existe alarme OPEN para o device.
+				slog.Info("Evento duplicado ignorado",
+					"motivo", "dispositivo ja possui alarme OPEN", "device_id", event.DeviceID)
 			}
-
-			slog.Error("Falha ao salvar no banco", "tentativa", attempt, "erro", err.Error(), "device_id", event.DeviceID)
-			
-			if attempt < maxRetries {
-				time.Sleep(baseRetryDelay * time.Duration(attempt)) // Exponential backoff simples
-			}
+			return
 		}
 
-		// Se chegou aqui, esgotou as tentativas. Envia para DLQ.
-		slog.Error("Esgotadas as tentativas", "acao", "enviando para DLQ", "device_id", event.DeviceID)
-		if err := dlq.Publish(payload); err != nil {
-			slog.Error("Erro fatal ao enviar para DLQ", "erro", err.Error(), "device_id", event.DeviceID)
+		slog.Warn("Falha ao salvar no banco",
+			"tentativa", attempt, "erro", err.Error(), "device_id", event.DeviceID)
+
+		if attempt < p.MaxRetries {
+			time.Sleep(p.BaseRetryDelay * time.Duration(attempt))
 		}
 	}
+
+	slog.Error("Esgotadas as tentativas de persistencia", "device_id", event.DeviceID)
+	p.toDLQ(payload, "db_failure")
+}
+
+func (p *Processor) toDLQ(payload []byte, motivo string) {
+	if err := p.DLQ.Publish(payload); err != nil {
+		// Se nem a DLQ funciona, o log estruturado é o último registro do evento.
+		slog.Error("Falha ao enviar para DLQ",
+			"erro", err.Error(), "motivo_original", motivo, "payload", string(payload))
+		return
+	}
+	slog.Warn("Evento enviado para DLQ", "motivo", motivo, "payload", string(payload))
 }

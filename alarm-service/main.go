@@ -3,196 +3,168 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	_ "github.com/lib/pq"
 	httpSwagger "github.com/swaggo/http-swagger"
 
-	// O pacote docs gerado pelo Swaggo
 	_ "alarm-service/docs"
 )
 
-// Implementação real que envia falhas críticas para um tópico DLQ no Mosquitto
+// MQTTDLQPublisher envia falhas críticas para o tópico de DLQ.
+//
+// MQTT não é fila, é pub/sub. Sem retenção, porém a última falha fica disponível para quem assinar o tópico depois.
+// É uma limitação  só a última mensagem por tópico é preservada.
 type MQTTDLQPublisher struct {
 	Client mqtt.Client
+	Topic  string
 }
 
 func (m *MQTTDLQPublisher) Publish(payload []byte) error {
-	token := m.Client.Publish("alarms/events/dlq", 1, false, payload)
-	token.Wait()
+	token := m.Client.Publish(m.Topic, 1, true, payload)
+	if !token.WaitTimeout(5 * time.Second) {
+		return errors.New("timeout ao publicar na DLQ")
+	}
 	return token.Error()
-}
-
-// Variável global temporária para os handlers acessarem o repositório
-var repo AlarmRepository
-
-// healthHandler checa as duas dependências externas do serviço.
-// Se o banco ou o broker estiverem fora, responde 503 e o Docker
-// marca o container como unhealthy.
-func healthHandler(db *sql.DB, client mqtt.Client) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		dbUp := db.PingContext(ctx) == nil
-		mqttUp := client.IsConnected()
-
-		body := map[string]string{
-			"status":   "UP",
-			"database": state(dbUp),
-			"mqtt":     state(mqttUp),
-		}
-
-		if !dbUp || !mqttUp {
-			body["status"] = "DOWN"
-			slog.Warn("Health check falhou", "database", state(dbUp), "mqtt", state(mqttUp))
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-
-		json.NewEncoder(w).Encode(body)
-	}
-}
-
-func state(up bool) string {
-	if up {
-		return "up"
-	}
-	return "down"
 }
 
 // @title Alarm System API
 // @version 1.0
 // @description API para gerenciamento do ciclo de vida dos alarmes IoT.
-// @host localhost:8081
 // @BasePath /
 func main() {
-	// Configura o Log Estruturado (JSON) como padrão
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	// 1. Conexão com o PostgreSQL
-	dbConnStr := "postgres://admin:password123@database:5432/alarm_db?sslmode=disable"
-	db, err := sql.Open("postgres", dbConnStr)
-	if err != nil {
-		slog.Error("Erro ao inicializar conexão com o banco", "erro", err.Error())
-		os.Exit(1)
-	}
+	cfg := LoadConfig()
+
+	db := mustConnectDB(cfg)
 	defer db.Close()
 
-	if err := db.Ping(); err != nil {
-		slog.Error("Banco de dados não está respondendo", "erro", err.Error())
-		os.Exit(1)
-	}
-	slog.Info("Conectado ao PostgreSQL")
+	repo := &PostgresRepository{DB: db}
 
-	repo = &PostgresRepository{DB: db}
+	mqttClient := mustConnectMQTT(cfg, repo)
+	defer mqttClient.Disconnect(250)
 
-	// 2. Conexão com o MQTT
-	opts := mqtt.NewClientOptions().AddBroker("tcp://broker:1883").SetClientID("alarm-service")
-	opts.SetKeepAlive(2 * time.Second)
-	opts.SetPingTimeout(1 * time.Second)
+	api := &AlarmAPI{Repo: repo, DB: db, MQTT: mqttClient}
 
-	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
-		dlq := &MQTTDLQPublisher{Client: client}
-		ProcessEvent(repo, dlq, msg.Payload())
-	})
-
-	mqttClient := mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		slog.Error("Erro ao conectar no MQTT", "erro", token.Error())
-		os.Exit(1)
-	}
-	slog.Info("Conectado ao Broker MQTT")
-
-	if token := mqttClient.Subscribe("alarms/events", 1, nil); token.Wait() && token.Error() != nil {
-		slog.Error("Erro ao assinar tópico", "erro", token.Error())
-		os.Exit(1)
-	}
-	slog.Info("Aguardando eventos", "topico", "alarms/events")
-
-	// 3. Rotas da API
-	http.HandleFunc("/alarms", getAlarmsHandler)
-	http.HandleFunc("/alarms/", closeAlarmHandler)
-
-	// Rota de Health Check
-	http.HandleFunc("/health", healthHandler(db, mqttClient))
-
-	// Rota do Swagger UI (com apontamento explícito para corrigir o 404)
-	http.HandleFunc("/swagger/", httpSwagger.Handler(
+	mux := http.NewServeMux()
+	api.Routes(mux)
+	mux.HandleFunc("GET /swagger/", httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"),
 	))
 
-	slog.Info("Alarm Service rodando", "porta", 8081)
-	if err := http.ListenAndServe(":8081", nil); err != nil {
-		slog.Error("Erro ao iniciar servidor HTTP", "erro", err.Error())
+	srv := &http.Server{
+		Addr:              ":" + cfg.HTTPPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		slog.Info("Alarm Service rodando", "porta", cfg.HTTPPort)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Erro ao iniciar servidor HTTP", "erro", err.Error())
+			os.Exit(1)
+		}
+	}()
+
+	waitForShutdown(srv)
+}
+
+func mustConnectDB(cfg Config) *sql.DB {
+	db, err := sql.Open("postgres", cfg.DSN())
+	if err != nil {
+		slog.Error("Erro ao inicializar conexao com o banco", "erro", err.Error())
 		os.Exit(1)
 	}
+
+	// Sem esses limites, o pool cresce sem teto e pode estourar o
+	// max_connections do Postgres sob carga.
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		slog.Error("Banco de dados nao esta respondendo", "erro", err.Error())
+		os.Exit(1)
+	}
+
+	slog.Info("Conectado ao PostgreSQL", "host", cfg.DBHost, "database", cfg.DBName)
+	return db
 }
 
-// getAlarmsHandler godoc
-// @Summary Lista todos os alarmes
-// @Description Retorna a lista completa de alarmes (abertos e fechados)
-// @Tags alarms
-// @Produce json
-// @Success 200 {array} Alarm
-// @Failure 500 {string} string "Erro ao buscar alarmes"
-// @Router /alarms [get]
-func getAlarmsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+func mustConnectMQTT(cfg Config, repo AlarmRepository) mqtt.Client {
+	opts := mqtt.NewClientOptions().
+		AddBroker(cfg.MQTTBrokerURL).
+		SetClientID(cfg.MQTTClientID).
+		// KeepAlive de 2s com PingTimeout de 1s fazia o cliente derrubar a
+		// conexão a cada oscilação de rede maior que 1 segundo, gerando
+		// reconexões em cascata. 30s/10s é o intervalo usual.
+		SetKeepAlive(30 * time.Second).
+		SetPingTimeout(10 * time.Second).
+		SetAutoReconnect(true).
+		SetMaxReconnectInterval(30 * time.Second).
+		// CleanSession false + ClientID fixo: o broker guarda a assinatura e as
+		// mensagens QoS 1 publicadas enquanto o serviço estava fora do ar.
+		// Com CleanSession true, tudo publicado durante um restart era perdido.
+		SetCleanSession(false)
 
-	if r.Method == http.MethodGet {
-		alarms, err := repo.GetAlarms()
-		if err != nil {
-			slog.Error("Erro ao buscar alarmes no banco", "erro", err.Error())
-			http.Error(w, `{"error": "erro ao buscar alarmes"}`, http.StatusInternalServerError)
+	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+		slog.Error("Conexao com o broker perdida", "erro", err.Error())
+	})
+
+	// A assinatura vai dentro do OnConnect.
+	// Registrando aqui, toda reconexão restabelece a assinatura.
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		slog.Info("Conectado ao Broker MQTT", "broker", cfg.MQTTBrokerURL)
+
+		dlq := &MQTTDLQPublisher{Client: client, Topic: cfg.MQTTDLQTopic}
+		processor := NewProcessor(repo, dlq, cfg.MaxRetries, cfg.BaseRetryDelay)
+
+		handler := func(_ mqtt.Client, msg mqtt.Message) {
+			processor.ProcessEvent(msg.Payload())
+		}
+
+		// Handler explícito no Subscribe em vez do DefaultPublishHandler:
+		// deixa claro qual função trata qual tópico.
+		token := client.Subscribe(cfg.MQTTTopic, 1, handler)
+		if token.WaitTimeout(10*time.Second) && token.Error() != nil {
+			slog.Error("Erro ao assinar topico", "topico", cfg.MQTTTopic, "erro", token.Error())
 			return
 		}
-		if alarms == nil {
-			alarms = []Alarm{}
-		}
-		json.NewEncoder(w).Encode(alarms)
-		return
+		slog.Info("Aguardando eventos", "topico", cfg.MQTTTopic)
+	})
+
+	client := mqtt.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		slog.Error("Erro ao conectar no MQTT", "erro", token.Error())
+		os.Exit(1)
 	}
-	http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+	return client
 }
 
-// closeAlarmHandler godoc
-// @Summary Desliga um alarme
-// @Description Altera o status do alarme para CLOSED e preenche a data de encerramento
-// @Tags alarms
-// @Param id path string true "UUID do Alarme"
-// @Success 200 {string} string "OK"
-// @Failure 404 {string} string "Rota não encontrada"
-// @Failure 500 {string} string "Erro interno"
-// @Router /alarms/{id}/close [patch]
-func closeAlarmHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "PATCH")
+func waitForShutdown(srv *http.Server) {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/close") {
-		parts := strings.Split(r.URL.Path, "/")
-		if len(parts) >= 3 {
-			id := parts[2]
-			if err := repo.CloseAlarm(id); err != nil {
-				slog.Error("Erro ao fechar alarme no banco", "erro", err.Error(), "alarm_id", id)
-				http.Error(w, `{"error": "erro ao fechar alarme"}`, http.StatusInternalServerError)
-				return
-			}
-			slog.Info("Alarme fechado via API", "alarm_id", id)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+	slog.Info("Encerrando Alarm Service")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("Erro no shutdown do servidor HTTP", "erro", err.Error())
 	}
-	http.Error(w, "Rota não encontrada", http.StatusNotFound)
 }

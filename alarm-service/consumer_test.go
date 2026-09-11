@@ -6,94 +6,165 @@ import (
 	"time"
 )
 
-// Diminui o tempo de espera no teste para não ficar lento
-func init() {
-	baseRetryDelay = time.Millisecond
-}
-
-// Mock do Banco de Dados
 type MockRepository struct {
-	SavedAlarms     int
-	MockHasOpen     bool
-	FailCreateCount int // Quantas vezes deve simular erro antes de acertar
-	AttemptsCount   int // Conta quantas vezes o CreateAlarm foi chamado
+	SavedAlarms   int
+	AttemptsCount int
+	FailCount     int  // quantas chamadas devem retornar erro antes de passar
+	Duplicate     bool // simula o índice único suprimindo o insert
 }
 
-func (m *MockRepository) HasOpenAlarm(deviceID string) (bool, error) {
-	return m.MockHasOpen, nil
-}
-
-func (m *MockRepository) CreateAlarm(deviceID, eventType string) error {
+func (m *MockRepository) CreateAlarm(deviceID, eventType string) (bool, error) {
 	m.AttemptsCount++
-	if m.FailCreateCount > 0 {
-		m.FailCreateCount--
-		return errors.New("erro simulado no banco")
+	if m.FailCount > 0 {
+		m.FailCount--
+		return false, errors.New("erro simulado no banco")
+	}
+	if m.Duplicate {
+		return false, nil
 	}
 	m.SavedAlarms++
-	return nil
+	return true, nil
 }
 
-func (m *MockRepository) GetAlarms() ([]Alarm, error) { return nil, nil }
-func (m *MockRepository) CloseAlarm(id string) error  { return nil }
+func (m *MockRepository) GetAlarms() ([]Alarm, error)        { return nil, nil }
+func (m *MockRepository) CloseAlarm(id string) (bool, error) { return true, nil }
 
-// Mock do Publicador DLQ
 type MockDLQ struct {
 	PublishedMessages int
+	ShouldFail        bool
 }
 
 func (m *MockDLQ) Publish(payload []byte) error {
+	if m.ShouldFail {
+		return errors.New("dlq indisponivel")
+	}
 	m.PublishedMessages++
 	return nil
 }
 
-// 1. Testa Sucesso de primeira
+func novoProcessor(repo AlarmRepository, dlq DLQPublisher) *Processor {
+	return NewProcessor(repo, dlq, 3, time.Millisecond)
+}
+
+const payloadValido = `{"device_id": "sensor-001", "type": "MOTION_DETECTED"}`
+
 func TestProcessEvent_Success(t *testing.T) {
-	mockRepo := &MockRepository{MockHasOpen: false}
-	mockDLQ := &MockDLQ{}
-	payload := []byte(`{"device_id": "sensor-001", "type": "MOTION_DETECTED"}`)
+	repo := &MockRepository{}
+	dlq := &MockDLQ{}
 
-	ProcessEvent(mockRepo, mockDLQ, payload)
+	novoProcessor(repo, dlq).ProcessEvent([]byte(payloadValido))
 
-	if mockRepo.SavedAlarms != 1 {
-		t.Errorf("Esperava 1 alarme salvo, mas obteve %d", mockRepo.SavedAlarms)
+	if repo.SavedAlarms != 1 {
+		t.Errorf("esperava 1 alarme salvo, obteve %d", repo.SavedAlarms)
+	}
+	if dlq.PublishedMessages != 0 {
+		t.Errorf("nao deveria usar a DLQ")
 	}
 }
 
-// 2. Testa Sucesso após 2 falhas (Retry)
 func TestProcessEvent_SuccessAfterRetries(t *testing.T) {
-	mockRepo := &MockRepository{MockHasOpen: false, FailCreateCount: 2}
-	mockDLQ := &MockDLQ{}
-	payload := []byte(`{"device_id": "sensor-001", "type": "MOTION_DETECTED"}`)
+	repo := &MockRepository{FailCount: 2}
+	dlq := &MockDLQ{}
 
-	ProcessEvent(mockRepo, mockDLQ, payload)
+	novoProcessor(repo, dlq).ProcessEvent([]byte(payloadValido))
 
-	if mockRepo.AttemptsCount != 3 {
-		t.Errorf("Esperava 3 tentativas no banco, mas obteve %d", mockRepo.AttemptsCount)
+	if repo.AttemptsCount != 3 {
+		t.Errorf("esperava 3 tentativas, obteve %d", repo.AttemptsCount)
 	}
-	if mockRepo.SavedAlarms != 1 {
-		t.Errorf("Esperava que salvasse na 3ª tentativa, mas salvou %d", mockRepo.SavedAlarms)
+	if repo.SavedAlarms != 1 {
+		t.Errorf("esperava salvar na 3a tentativa, salvou %d", repo.SavedAlarms)
 	}
-	if mockDLQ.PublishedMessages != 0 {
-		t.Errorf("Não deveria ir para DLQ")
+	if dlq.PublishedMessages != 0 {
+		t.Errorf("nao deveria ir para DLQ")
 	}
 }
 
-// 3. Testa Falha total indo para DLQ
 func TestProcessEvent_FailsAndGoesToDLQ(t *testing.T) {
-	// Vai falhar sempre (configuramos para falhar 5 vezes, ou seja, excede as 3 tentativas)
-	mockRepo := &MockRepository{MockHasOpen: false, FailCreateCount: 5}
-	mockDLQ := &MockDLQ{}
-	payload := []byte(`{"device_id": "sensor-001", "type": "MOTION_DETECTED"}`)
+	repo := &MockRepository{FailCount: 5}
+	dlq := &MockDLQ{}
 
-	ProcessEvent(mockRepo, mockDLQ, payload)
+	novoProcessor(repo, dlq).ProcessEvent([]byte(payloadValido))
 
-	if mockRepo.AttemptsCount != 3 {
-		t.Errorf("Esperava desistir após 3 tentativas, mas tentou %d", mockRepo.AttemptsCount)
+	if repo.AttemptsCount != 3 {
+		t.Errorf("esperava desistir apos 3 tentativas, tentou %d", repo.AttemptsCount)
 	}
-	if mockRepo.SavedAlarms != 0 {
-		t.Errorf("Não deveria salvar nada")
+	if repo.SavedAlarms != 0 {
+		t.Errorf("nao deveria salvar nada")
 	}
-	if mockDLQ.PublishedMessages != 1 {
-		t.Errorf("Esperava 1 mensagem na DLQ, obteve %d", mockDLQ.PublishedMessages)
+	if dlq.PublishedMessages != 1 {
+		t.Errorf("esperava 1 mensagem na DLQ, obteve %d", dlq.PublishedMessages)
+	}
+}
+
+// Duplicata suprimida pelo índice único não é erro e não vai para a DLQ.
+func TestProcessEvent_DuplicadoNaoViraErro(t *testing.T) {
+	repo := &MockRepository{Duplicate: true}
+	dlq := &MockDLQ{}
+
+	novoProcessor(repo, dlq).ProcessEvent([]byte(payloadValido))
+
+	if repo.AttemptsCount != 1 {
+		t.Errorf("duplicata nao deveria gerar retry, tentou %d vezes", repo.AttemptsCount)
+	}
+	if repo.SavedAlarms != 0 {
+		t.Errorf("nao deveria contar como salvo")
+	}
+	if dlq.PublishedMessages != 0 {
+		t.Errorf("duplicata nao e falha, nao deveria ir para DLQ")
+	}
+}
+
+
+func TestProcessEvent_JSONInvalidoVaiParaDLQ(t *testing.T) {
+	repo := &MockRepository{}
+	dlq := &MockDLQ{}
+
+	novoProcessor(repo, dlq).ProcessEvent([]byte(`{quebrado`))
+
+	if repo.AttemptsCount != 0 {
+		t.Errorf("nao deveria tocar no banco")
+	}
+	if dlq.PublishedMessages != 1 {
+		t.Errorf("esperava 1 mensagem na DLQ, obteve %d", dlq.PublishedMessages)
+	}
+}
+
+func TestProcessEvent_CamposObrigatoriosVaoParaDLQ(t *testing.T) {
+	repo := &MockRepository{}
+	dlq := &MockDLQ{}
+
+	novoProcessor(repo, dlq).ProcessEvent([]byte(`{"device_id": "", "type": "MOTION_DETECTED"}`))
+
+	if repo.AttemptsCount != 0 {
+		t.Errorf("nao deveria tocar no banco")
+	}
+	if dlq.PublishedMessages != 1 {
+		t.Errorf("esperava 1 mensagem na DLQ, obteve %d", dlq.PublishedMessages)
+	}
+}
+
+func TestProcessEvent_TipoDesconhecidoNaoGeraAlarme(t *testing.T) {
+	repo := &MockRepository{}
+	dlq := &MockDLQ{}
+
+	novoProcessor(repo, dlq).ProcessEvent([]byte(`{"device_id": "sensor-001", "type": "HEARTBEAT"}`))
+
+	if repo.AttemptsCount != 0 {
+		t.Errorf("nao deveria criar alarme para tipo desconhecido")
+	}
+	if dlq.PublishedMessages != 0 {
+		t.Errorf("tipo desconhecido e valido, nao e caso de DLQ")
+	}
+}
+
+// A falha da própria DLQ não pode derrubar o processamento.
+func TestProcessEvent_DLQIndisponivelNaoQuebra(t *testing.T) {
+	repo := &MockRepository{FailCount: 5}
+	dlq := &MockDLQ{ShouldFail: true}
+
+	novoProcessor(repo, dlq).ProcessEvent([]byte(payloadValido))
+
+	if dlq.PublishedMessages != 0 {
+		t.Errorf("DLQ falhou, nao deveria contabilizar publicacao")
 	}
 }

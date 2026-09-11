@@ -14,10 +14,16 @@ type Alarm struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
-// AlarmRepository define os métodos necessários para interagir com os alarmes
+// AlarmRepository define os métodos necessários para interagir com os alarmes.
+
 type AlarmRepository interface {
-	HasOpenAlarm(deviceID string) (bool, error)
-	CreateAlarm(deviceID string, eventType string) error
+	// CreateAlarm retorna created=false quando o insert foi suprimido
+	// por já existir um alarme OPEN para o mesmo device. Isso não é erro.
+	CreateAlarm(deviceID string, eventType string) (created bool, err error)
+
 	GetAlarms() ([]Alarm, error)
-	CloseAlarm(id string) error
+
+	// CloseAlarm retorna closed=false quando nenhuma linha foi afetada,
+	// ou seja, o alarme não existe ou já estava fechado.
+	CloseAlarm(id string) (closed bool, err error)
 }
